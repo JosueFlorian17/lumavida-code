@@ -1,0 +1,945 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LumaVida - Verificación de Vida Facial (rPPG & Reflectancia)</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Chart.js para visualización de ondas rPPG y espectro FFT -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        .flash-overlay {
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.05s ease, background-color 0.05s ease;
+            z-index: 9999;
+        }
+        .oval-mask {
+            border: 3px dashed rgba(56, 189, 248, 0.7);
+            border-radius: 50% / 60%;
+            box-shadow: 0 0 25px rgba(56, 189, 248, 0.25);
+        }
+        .pulse-wave {
+            animation: pulse-ring 2s cubic-bezier(0.215, 0.61, 0.355, 1) infinite;
+        }
+        @keyframes pulse-ring {
+            0% { transform: scale(0.95); opacity: 0.8; }
+            50% { transform: scale(1.03); opacity: 1; }
+            100% { transform: scale(0.95); opacity: 0.8; }
+        }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen font-sans antialiased flex flex-col">
+
+    <!-- Flash cromático de pantalla completa para estímulo de reflectancia -->
+    <div id="flashOverlay" class="flash-overlay"></div>
+
+    <!-- Encabezado Institucional -->
+    <header class="border-b border-slate-800 bg-slate-900/80 backdrop-blur sticky top-0 z-40">
+        <div class="max-w-7xl mx-auto px-4 py-3 sm:px-6 flex items-center justify-between">
+            <div class="flex items-center space-x-3">
+                <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-cyan-500 to-blue-600 flex items-center justify-center shadow-lg shadow-cyan-500/20">
+                    <i data-lucide="shield-check" class="w-6 h-6 text-white"></i>
+                </div>
+                <div>
+                    <h1 class="font-bold text-lg leading-tight tracking-tight flex items-center gap-2">
+                        LumaVida <span class="text-xs font-semibold px-2 py-0.5 rounded-full bg-cyan-950 text-cyan-400 border border-cyan-800/60">UPCH BioPAD</span>
+                    </h1>
+                    <p class="text-xs text-slate-400">Reflectancia Cutánea + Fotopletismografía Remota (rPPG)</p>
+                </div>
+            </div>
+            
+            <!-- Pestañas de navegación -->
+            <div class="flex items-center space-x-1 sm:space-x-2 bg-slate-800/80 p-1 rounded-xl text-xs sm:text-sm">
+                <button id="tabVerifyBtn" class="tab-btn px-3 py-1.5 rounded-lg bg-cyan-600 text-white font-medium transition" onclick="switchTab('verify')">
+                    Verificación
+                </button>
+                <button id="tabEnrollBtn" class="tab-btn px-3 py-1.5 rounded-lg text-slate-400 hover:text-white transition" onclick="switchTab('enroll')">
+                    Enrolar Usuario
+                </button>
+                <button id="tabSimulationBtn" class="tab-btn px-3 py-1.5 rounded-lg text-slate-400 hover:text-white transition" onclick="switchTab('simulation')">
+                    Simulación de Ataques
+                </button>
+                <button id="tabMetricsBtn" class="tab-btn px-3 py-1.5 rounded-lg text-slate-400 hover:text-white transition" onclick="switchTab('metrics')">
+                    Métricas ISO
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <!-- Contenedor Principal -->
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 py-6 flex-1 w-full">
+
+        <!-- ================= SECCIÓN 1: VERIFICACIÓN ================= -->
+        <div id="sectionVerify" class="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            
+            <!-- Columna Izquierda: Cámara y Desafío de Vida -->
+            <div class="lg:col-span-6 flex flex-col space-y-4">
+                <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-xl flex flex-col items-center">
+                    <div class="w-full flex items-center justify-between mb-3 text-xs text-slate-400">
+                        <span class="flex items-center gap-1.5">
+                            <span id="camStatusDot" class="w-2 h-2 rounded-full bg-amber-500 animate-ping"></span>
+                            <span id="camStatusText">Iniciando cámara...</span>
+                        </span>
+                        <span class="font-mono bg-slate-800 px-2 py-0.5 rounded text-cyan-400" id="fpsDisplay">30 FPS</span>
+                    </div>
+
+                    <!-- Vista del Video con Guía Facial -->
+                    <div class="relative w-full aspect-[4/3] bg-black rounded-xl overflow-hidden flex items-center justify-center border border-slate-800">
+                        <video id="webcam" autoplay playsinline muted class="w-full h-full object-cover -scale-x-100"></video>
+                        <canvas id="captureCanvas" class="hidden"></canvas>
+                        
+                        <!-- Guía Facial Ovalada -->
+                        <div id="faceGuide" class="absolute w-52 h-64 oval-mask pointer-events-none transition-all duration-300 flex items-center justify-center">
+                            <div class="text-[10px] text-cyan-300/80 bg-slate-900/80 px-2 py-0.5 rounded-full backdrop-blur">
+                                Alinee su rostro aquí
+                            </div>
+                        </div>
+
+                        <!-- Indicador de flash perimetral local -->
+                        <div id="chromaHalo" class="absolute inset-0 pointer-events-none border-8 border-transparent transition-all duration-100"></div>
+
+                        <!-- Badge de estado de captura -->
+                        <div id="captureProgressBadge" class="hidden absolute bottom-3 bg-slate-900/90 border border-cyan-500/50 px-3 py-1 rounded-full text-xs text-cyan-300 font-medium backdrop-blur">
+                            Proyectando estímulo cromático: <span id="progressPct">0%</span>
+                        </div>
+                    </div>
+
+                    <!-- Selector de Usuario para Verificación 1:1 -->
+                    <div class="w-full mt-4 flex items-center gap-3">
+                        <div class="flex-1">
+                            <label class="block text-xs font-medium text-slate-400 mb-1">Usuario para Matching 1:1 (ArcFace)</label>
+                            <select id="userSelect" class="w-full bg-slate-800 border border-slate-700 text-slate-200 text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-cyan-500">
+                                <option value="">-- Sin usuario (Solo prueba de vida / Liveness) --</option>
+                            </select>
+                        </div>
+                        <button id="refreshUsersBtn" onclick="loadEnrolledUsers()" title="Actualizar usuarios" class="mt-5 p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg border border-slate-700">
+                            <i data-lucide="refresh-cw" class="w-4 h-4"></i>
+                        </button>
+                    </div>
+
+                    <!-- Botón de Acción Principal -->
+                    <button id="startVerifyBtn" onclick="startLivenessVerification()" class="mt-4 w-full py-3 px-4 rounded-xl font-semibold text-sm bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white shadow-lg shadow-cyan-500/25 transition-all flex items-center justify-center gap-2">
+                        <i data-lucide="sparkles" class="w-4 h-4"></i>
+                        <span>Iniciar Verificación de Vida (LumaVida)</span>
+                    </button>
+                    <p class="text-[11px] text-slate-500 mt-2 text-center">
+                        La pantalla proyectará una secuencia cromática de ~2s mientras se extrae reflectancia y pulso rPPG.
+                    </p>
+                </div>
+
+                <!-- Marco Normativo y Estándares -->
+                <div class="bg-slate-900/60 border border-slate-800/80 rounded-2xl p-4 text-xs text-slate-400 space-y-2">
+                    <div class="font-semibold text-slate-300 flex items-center gap-1.5">
+                        <i data-lucide="shield" class="w-4 h-4 text-cyan-400"></i>
+                        Garantías de Ciberseguridad Aplicada
+                    </div>
+                    <ul class="list-disc list-inside space-y-1 text-[11px]">
+                        <li><span class="text-slate-300">ISO/IEC 30107-3:</span> Detección de ataques de presentación (PAD) activa/pasiva.</li>
+                        <li><span class="text-slate-300">ISO/IEC 24745:</span> Protección de plantillas biométricas (BTP) cifradas en reposo.</li>
+                        <li><span class="text-slate-300">Ley N.° 29733 & D.S. 016-2024-JUS:</span> Datos biométricos protegidos sin almacenamiento de fotos en claro.</li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- Columna Derecha: Resultados de Diagnóstico y Telemetría -->
+            <div class="lg:col-span-6 flex flex-col space-y-4">
+                
+                <!-- Tarjeta de Decisión Principal -->
+                <div id="verdictCard" class="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl transition-all">
+                    <div class="flex items-center justify-between mb-3">
+                        <span class="text-xs uppercase tracking-wider font-semibold text-slate-400">Dictamen del Sistema LumaVida</span>
+                        <span id="latencyBadge" class="text-xs font-mono bg-slate-800 text-slate-300 px-2 py-0.5 rounded">Latencia: -- ms</span>
+                    </div>
+
+                    <div id="verdictContent" class="flex flex-col items-center justify-center py-6 text-center">
+                        <div class="w-16 h-16 rounded-full bg-slate-800 flex items-center justify-center text-slate-500 mb-3">
+                            <i data-lucide="user-check" class="w-8 h-8"></i>
+                        </div>
+                        <h2 class="text-lg font-bold text-slate-300">Esperando Verificación</h2>
+                        <p class="text-xs text-slate-500 max-w-sm mt-1">
+                            Presione el botón para realizar el test de reflectancia cutánea y fotopletismografía remota.
+                        </p>
+                    </div>
+                </div>
+
+                <!-- Desglose de Fusión de Señales: Reflectancia & rPPG -->
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    
+                    <!-- Módulo 1: Reflectancia Cutánea -->
+                    <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex flex-col justify-between">
+                        <div>
+                            <div class="flex items-center justify-between text-xs mb-2">
+                                <span class="font-semibold text-slate-300 flex items-center gap-1.5">
+                                    <i data-lucide="sun-medium" class="w-4 h-4 text-amber-400"></i>
+                                    Reflectancia Cutánea
+                                </span>
+                                <span id="refBadge" class="px-2 py-0.5 rounded text-[10px] bg-slate-800 text-slate-400">--</span>
+                            </div>
+                            <div class="text-2xl font-bold font-mono text-slate-100" id="refScoreDisplay">0.00</div>
+                            <div class="text-[11px] text-slate-400 mt-1" id="refDetailText">Correlación espectral y dispersión subdérmica</div>
+                        </div>
+                        <div class="mt-3 pt-2 border-t border-slate-800/80 text-[10px] text-slate-500 flex justify-between">
+                            <span>Reflejo especular: <b id="specularRatioText" class="text-slate-400">--</b></span>
+                            <span>Corr: <b id="corrText" class="text-slate-400">--</b></span>
+                        </div>
+                    </div>
+
+                    <!-- Módulo 2: rPPG Pulso Cardíaco -->
+                    <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex flex-col justify-between">
+                        <div>
+                            <div class="flex items-center justify-between text-xs mb-2">
+                                <span class="font-semibold text-slate-300 flex items-center gap-1.5">
+                                    <i data-lucide="heart-pulse" class="w-4 h-4 text-rose-400"></i>
+                                    Pulso Cardíaco rPPG
+                                </span>
+                                <span id="rppgBadge" class="px-2 py-0.5 rounded text-[10px] bg-slate-800 text-slate-400">--</span>
+                            </div>
+                            <div class="flex items-baseline gap-1">
+                                <span class="text-2xl font-bold font-mono text-slate-100" id="bpmDisplay">--</span>
+                                <span class="text-xs text-slate-400 font-medium">BPM</span>
+                            </div>
+                            <div class="text-[11px] text-slate-400 mt-1" id="rppgDetailText">Variación hemodinámica en canales G/R</div>
+                        </div>
+                        <div class="mt-3 pt-2 border-t border-slate-800/80 text-[10px] text-slate-500 flex justify-between">
+                            <span>Relación SNR: <b id="snrText" class="text-slate-400">--</b></span>
+                            <span>Prominencia: <b id="promText" class="text-slate-400">--</b></span>
+                            <span>Confianza: <b id="rppgConfText" class="text-slate-400">--</b></span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Gráfico de Forma de Onda rPPG (BVP) -->
+                <div class="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+                    <div class="flex items-center justify-between mb-2">
+                        <span class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+                            <i data-lucide="activity" class="w-4 h-4 text-cyan-400"></i>
+                            Onda Pletismográfica Filtrada (BVP)
+                        </span>
+                        <span class="text-[10px] text-slate-500 font-mono">Filtro Butterworth 0.7 - 3.5 Hz</span>
+                    </div>
+                    <div class="w-full h-32">
+                        <canvas id="rppgChart"></canvas>
+                    </div>
+                </div>
+
+                <!-- Resultado de Reconocimiento Facial ArcFace 1:1 -->
+                <div id="arcfaceCard" class="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+                    <div class="flex items-center justify-between text-xs mb-2">
+                        <span class="font-semibold text-slate-300 flex items-center gap-1.5">
+                            <i data-lucide="scan-face" class="w-4 h-4 text-indigo-400"></i>
+                            Reconocimiento Facial ArcFace (1:1)
+                        </span>
+                        <span id="arcfaceBadge" class="px-2 py-0.5 rounded text-[10px] bg-slate-800 text-slate-400">En espera</span>
+                    </div>
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <div class="text-sm font-medium text-slate-200" id="arcfaceUserMsg">Sin usuario seleccionado</div>
+                            <div class="text-xs text-slate-500" id="arcfaceDetailsMsg">Umbral requerido: &ge; 0.62 (FMR &lt; 0.01%)</div>
+                        </div>
+                        <div class="text-right">
+                            <div class="text-xl font-bold font-mono text-slate-200" id="similarityScoreDisplay">--</div>
+                            <div class="text-[10px] text-slate-500">Similitud Coseno</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ================= SECCIÓN 2: ENROLAR USUARIO ================= -->
+        <div id="sectionEnroll" class="hidden max-w-2xl mx-auto bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl space-y-6">
+            <div>
+                <h2 class="text-lg font-bold text-slate-100 flex items-center gap-2">
+                    <i data-lucide="user-plus" class="w-5 h-5 text-cyan-400"></i>
+                    Enrolamiento Biométrico con Protección BTP (ISO/IEC 24745)
+                </h2>
+                <p class="text-xs text-slate-400 mt-1">
+                    Conforme a la Ley N.° 29733 y D.S. 016-2024-JUS, la imagen del rostro no se guarda en disco.
+                    Se extrae el vector de 512-D de ArcFace y se cifra con AES-256-GCM + Biohashing cancelable.
+                </p>
+            </div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                    <label class="block text-xs font-medium text-slate-300 mb-1">ID de Usuario / DNI</label>
+                    <input id="enrollUserId" type="text" placeholder="Ej: 72849102" class="w-full bg-slate-800 border border-slate-700 text-slate-100 text-sm rounded-xl px-3 py-2.5 focus:border-cyan-500 outline-none">
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-slate-300 mb-1">Nombre Completo</label>
+                    <input id="enrollFullName" type="text" placeholder="Ej: Carlos Mendoza" class="w-full bg-slate-800 border border-slate-700 text-slate-100 text-sm rounded-xl px-3 py-2.5 focus:border-cyan-500 outline-none">
+                </div>
+            </div>
+
+            <!-- Vista previa para captura de foto de referencia -->
+            <div class="relative w-full aspect-video bg-black rounded-xl overflow-hidden flex items-center justify-center border border-slate-800">
+                <video id="enrollWebcam" autoplay playsinline muted class="w-full h-full object-cover -scale-x-100"></video>
+                <div class="absolute w-40 h-52 oval-mask pointer-events-none"></div>
+            </div>
+
+            <button onclick="enrollCurrentUser()" class="w-full py-3 px-4 rounded-xl font-semibold text-sm bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white shadow-lg shadow-cyan-500/20 transition flex items-center justify-center gap-2">
+                <i data-lucide="lock" class="w-4 h-4"></i>
+                <span>Capturar y Enrolar con Plantilla Cifrada (BTP)</span>
+            </button>
+
+            <div id="enrollResult" class="hidden p-4 rounded-xl text-xs space-y-1"></div>
+        </div>
+
+        <!-- ================= SECCIÓN 3: SIMULACIÓN DE ATAQUES ================= -->
+        <div id="sectionSimulation" class="hidden max-w-4xl mx-auto space-y-6">
+            <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6">
+                <h2 class="text-lg font-bold text-slate-100 flex items-center gap-2">
+                    <i data-lucide="shield-alert" class="w-5 h-5 text-rose-400"></i>
+                    Banco de Pruebas: Simulación Forense de Ataques (Capítulo V UPCH)
+                </h2>
+                <p class="text-xs text-slate-400 mt-1">
+                    Permite evaluar el comportamiento del pipeline ante los vectores de amenaza detallados en la investigación académica.
+                </p>
+
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mt-6">
+                    <!-- Escenario 1: Foto Impresa -->
+                    <div class="bg-slate-800/60 border border-slate-700/60 rounded-xl p-4 flex flex-col justify-between">
+                        <div>
+                            <div class="w-10 h-10 rounded-lg bg-amber-500/10 text-amber-400 flex items-center justify-center mb-3">
+                                <i data-lucide="image" class="w-5 h-5"></i>
+                            </div>
+                            <h3 class="font-bold text-sm text-slate-200">1. Foto Impresa</h3>
+                            <p class="text-[11px] text-slate-400 mt-1">
+                                Fotografía estática en papel mate/brillo. Sin flujo sanguíneo ni modulación biológica de reflectancia.
+                            </p>
+                        </div>
+                        <button onclick="runAttackSimulation('photo')" class="mt-4 w-full py-2 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg text-xs font-semibold transition">
+                            Simular Ataque
+                        </button>
+                    </div>
+
+                    <!-- Escenario 2: Pantalla / Video Replay -->
+                    <div class="bg-slate-800/60 border border-slate-700/60 rounded-xl p-4 flex flex-col justify-between">
+                        <div>
+                            <div class="w-10 h-10 rounded-lg bg-blue-500/10 text-blue-400 flex items-center justify-center mb-3">
+                                <i data-lucide="smartphone" class="w-5 h-5"></i>
+                            </div>
+                            <h3 class="font-bold text-sm text-slate-200">2. Pantalla de Smartphone</h3>
+                            <p class="text-[11px] text-slate-400 mt-1">
+                                Reproducción de video de la víctima. Presenta fuerte reflejo especular en el cristal de la pantalla.
+                            </p>
+                        </div>
+                        <button onclick="runAttackSimulation('screen')" class="mt-4 w-full py-2 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg text-xs font-semibold transition">
+                            Simular Ataque
+                        </button>
+                    </div>
+
+                    <!-- Escenario 3: Deepfake Sintético -->
+                    <div class="bg-slate-800/60 border border-slate-700/60 rounded-xl p-4 flex flex-col justify-between">
+                        <div>
+                            <div class="w-10 h-10 rounded-lg bg-purple-500/10 text-purple-400 flex items-center justify-center mb-3">
+                                <i data-lucide="bot" class="w-5 h-5"></i>
+                            </div>
+                            <h3 class="font-bold text-sm text-slate-200">3. Deepfake por IA</h3>
+                            <p class="text-[11px] text-slate-400 mt-1">
+                                Rostro sintético con movimiento y gestos, pero carece de absorción hemodinámica real en canales G/R.
+                            </p>
+                        </div>
+                        <button onclick="runAttackSimulation('deepfake')" class="mt-4 w-full py-2 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg text-xs font-semibold transition">
+                            Simular Ataque
+                        </button>
+                    </div>
+                </div>
+
+                <div id="simResultBox" class="hidden mt-6 p-4 rounded-xl border bg-slate-950 text-xs"></div>
+            </div>
+        </div>
+
+        <!-- ================= SECCIÓN 4: MÉTRICAS ISO ================= -->
+        <div id="sectionMetrics" class="hidden max-w-4xl mx-auto space-y-6">
+            <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
+                <div class="flex items-center justify-between mb-4">
+                    <h2 class="text-lg font-bold text-slate-100 flex items-center gap-2">
+                        <i data-lucide="bar-chart-2" class="w-5 h-5 text-cyan-400"></i>
+                        Indicadores y Métricas ISO/IEC 30107-3 e ISO/IEC 19795-1
+                    </h2>
+                    <button onclick="loadMetrics()" class="text-xs bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-lg text-slate-300">
+                        Actualizar
+                    </button>
+                </div>
+
+                <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4" id="metricsCards">
+                    <div class="bg-slate-800/50 p-4 rounded-xl border border-slate-700/50">
+                        <div class="text-slate-400 text-xs">Total Intentos</div>
+                        <div class="text-2xl font-bold font-mono text-slate-100 mt-1" id="mTotal">0</div>
+                    </div>
+                    <div class="bg-slate-800/50 p-4 rounded-xl border border-slate-700/50">
+                        <div class="text-slate-400 text-xs">Ataques Bloqueados (PAD)</div>
+                        <div class="text-2xl font-bold font-mono text-rose-400 mt-1" id="mBlocked">0</div>
+                    </div>
+                    <div class="bg-slate-800/50 p-4 rounded-xl border border-slate-700/50">
+                        <div class="text-slate-400 text-xs">Tasa APCER (Meta: 0%)</div>
+                        <div class="text-2xl font-bold font-mono text-emerald-400 mt-1" id="mApcer">0.0%</div>
+                    </div>
+                    <div class="bg-slate-800/50 p-4 rounded-xl border border-slate-700/50">
+                        <div class="text-slate-400 text-xs">Latencia Promedio</div>
+                        <div class="text-2xl font-bold font-mono text-cyan-400 mt-1" id="mLatency">0 ms</div>
+                    </div>
+                </div>
+
+                <div class="mt-6 bg-slate-950 p-4 rounded-xl border border-slate-800 text-xs space-y-2 font-mono text-slate-400">
+                    <div class="text-slate-300 font-semibold mb-1">Resumen de Cumplimiento Regulatorio:</div>
+                    <div>• ISO/IEC 30107-3 (PAD): Implementado (Fusión Reflectancia + rPPG)</div>
+                    <div>• ISO/IEC 19795-1 (Rendimiento): Evaluado bajo ArcFace 1:1 Cosine Similarity</div>
+                    <div>• ISO/IEC 24745 (BTP): Cifrado AES-256-GCM + Biohashing determinista</div>
+                    <div>• Marco Perú: Ley N° 29733 / D.S. 016-2024-JUS / Normativa SBS Onboarding</div>
+                </div>
+
+                <!-- Tabla de Historial de Intentos y Umbrales Promedio Observados -->
+                <div class="mt-6 pt-4 border-t border-slate-800">
+                    <h3 class="text-sm font-bold text-slate-200 mb-3 flex items-center gap-2">
+                        <i data-lucide="history" class="w-4 h-4 text-cyan-400"></i>
+                        Registro de Intentos y Umbrales Promedio Observados
+                    </h3>
+                    
+                    <!-- Tarjeta de Promedios Reales -->
+                    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4 text-xs">
+                        <div class="bg-slate-950 p-3 rounded-lg border border-slate-800">
+                            <span class="text-slate-500">SNR Promedio (Humanos):</span>
+                            <div class="text-base font-bold text-cyan-300 font-mono" id="avgBonaSnr">--</div>
+                            <span class="text-[10px] text-slate-500">Umbral mín: 0.38</span>
+                        </div>
+                        <div class="bg-slate-950 p-3 rounded-lg border border-slate-800">
+                            <span class="text-slate-500">BPM Promedio (Humanos):</span>
+                            <div class="text-base font-bold text-rose-300 font-mono" id="avgBonaBpm">--</div>
+                            <span class="text-[10px] text-slate-500">Rango: 48 - 180</span>
+                        </div>
+                        <div class="bg-slate-950 p-3 rounded-lg border border-slate-800">
+                            <span class="text-slate-500">Reflectancia Promedio:</span>
+                            <div class="text-base font-bold text-amber-300 font-mono" id="avgBonaRef">--</div>
+                            <span class="text-[10px] text-slate-500">Umbral mín: 0.22</span>
+                        </div>
+                        <div class="bg-slate-950 p-3 rounded-lg border border-slate-800">
+                            <span class="text-slate-500">Prominencia Pico rPPG:</span>
+                            <div class="text-base font-bold text-emerald-300 font-mono" id="avgBonaProm">--</div>
+                            <span class="text-[10px] text-slate-500">Umbral mín: 1.8x</span>
+                        </div>
+                    </div>
+
+                    <!-- Tabla de Últimos Intentos -->
+                    <div class="overflow-x-auto rounded-lg border border-slate-800">
+                        <table class="w-full text-[11px] text-left text-slate-300">
+                            <thead class="bg-slate-950 text-slate-400 uppercase text-[10px] tracking-wider border-b border-slate-800">
+                                <tr>
+                                    <th class="py-2 px-3">Hora</th>
+                                    <th class="py-2 px-3">Usuario</th>
+                                    <th class="py-2 px-3">Dictamen</th>
+                                    <th class="py-2 px-3">BPM</th>
+                                    <th class="py-2 px-3">SNR rPPG</th>
+                                    <th class="py-2 px-3">Reflectancia</th>
+                                    <th class="py-2 px-3">Latencia</th>
+                                </tr>
+                            </thead>
+                            <tbody id="historyTableBody" class="divide-y divide-slate-800/60 bg-slate-900/40">
+                                <tr>
+                                    <td colspan="7" class="py-4 text-center text-slate-500 italic">No hay intentos registrados aún en esta sesión.</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+    </main>
+
+    <!-- Pie de página -->
+    <footer class="border-t border-slate-800/80 bg-slate-950 py-3 text-center text-xs text-slate-500">
+        Universidad Peruana Cayetano Heredia • Temas Avanzados de Seguridad Informática • LumaVida 2026
+    </footer>
+
+    <!-- Lógica de Control JavaScript del Cliente -->
+    <script>
+        lucide.createIcons();
+
+        // Variables de estado
+        let videoStream = null;
+        const webcam = document.getElementById('webcam');
+        const enrollWebcam = document.getElementById('enrollWebcam');
+        const captureCanvas = document.getElementById('captureCanvas');
+        const flashOverlay = document.getElementById('flashOverlay');
+        const chromaHalo = document.getElementById('chromaHalo');
+        let rppgChartInstance = null;
+
+        // Inicializar Gráfico Chart.js
+        function initRPPGChart() {
+            const ctx = document.getElementById('rppgChart').getContext('2d');
+            rppgChartInstance = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: Array.from({length: 40}, (_, i) => i),
+                    datasets: [{
+                        label: 'Señal BVP Filtrada',
+                        data: Array(40).fill(0),
+                        borderColor: '#22d3ee',
+                        backgroundColor: 'rgba(34, 211, 238, 0.1)',
+                        borderWidth: 2,
+                        tension: 0.3,
+                        pointRadius: 0,
+                        fill: true
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: false,
+                    scales: {
+                        x: { display: false },
+                        y: { 
+                            grid: { color: 'rgba(255, 255, 255, 0.05)' },
+                            ticks: { color: '#64748b', font: { size: 9 } }
+                        }
+                    },
+                    plugins: {
+                        legend: { display: false }
+                    }
+                }
+            });
+        }
+
+        // Navegación por pestañas
+        function switchTab(tab) {
+            ['verify', 'enroll', 'simulation', 'metrics'].forEach(t => {
+                const sec = document.getElementById(`section${capitalize(t)}`);
+                const btn = document.getElementById(`tab${capitalize(t)}Btn`);
+                if (t === tab) {
+                    sec.classList.remove('hidden');
+                    btn.classList.add('bg-cyan-600', 'text-white');
+                    btn.classList.remove('text-slate-400');
+                } else {
+                    sec.classList.add('hidden');
+                    btn.classList.remove('bg-cyan-600', 'text-white');
+                    btn.classList.add('text-slate-400');
+                }
+            });
+
+            if (tab === 'enroll') {
+                if (videoStream && enrollWebcam) enrollWebcam.srcObject = videoStream;
+            } else if (tab === 'metrics') {
+                loadMetrics();
+            }
+        }
+
+        function capitalize(str) {
+            return str.charAt(0).toUpperCase() + str.slice(1);
+        }
+
+        // Acceso a Cámara Web Frontal
+        async function initCamera() {
+            try {
+                videoStream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        facingMode: 'user',
+                        width: { ideal: 640 },
+                        height: { ideal: 480 },
+                        frameRate: { ideal: 30 }
+                    },
+                    audio: false
+                });
+                webcam.srcObject = videoStream;
+                if (enrollWebcam) enrollWebcam.srcObject = videoStream;
+                
+                document.getElementById('camStatusDot').classList.remove('bg-amber-500', 'animate-ping');
+                document.getElementById('camStatusDot').classList.add('bg-emerald-500');
+                document.getElementById('camStatusText').textContent = 'Cámara Activa (30 FPS)';
+            } catch (err) {
+                console.error("Error al acceder a la cámara:", err);
+                document.getElementById('camStatusDot').classList.remove('bg-amber-500', 'animate-ping');
+                document.getElementById('camStatusDot').classList.add('bg-rose-500');
+                document.getElementById('camStatusText').textContent = 'Acceso a cámara denegado';
+                alert("Por favor concede permisos para acceder a la cámara frontal.");
+            }
+        }
+
+        // Cargar usuarios enrolados en selector
+        async function loadEnrolledUsers() {
+            try {
+                const res = await fetch('/api/users');
+                const data = await res.json();
+                const sel = document.getElementById('userSelect');
+                sel.innerHTML = '<option value="">-- Sin usuario (Solo prueba de vida / Liveness) --</option>';
+                data.enrolled_users.forEach(u => {
+                    const opt = document.createElement('option');
+                    opt.value = u.user_id;
+                    opt.textContent = `${u.full_name} (${u.user_id})`;
+                    sel.appendChild(opt);
+                });
+
+                // Recordar identidad local en este dispositivo (Edge Identity)
+                const savedLocalId = localStorage.getItem('luma_user_id');
+                if (savedLocalId && Array.from(sel.options).some(o => o.value === savedLocalId)) {
+                    sel.value = savedLocalId;
+                }
+            } catch (e) {
+                console.error("Error cargando usuarios:", e);
+            }
+        }
+
+        // Enrolar Usuario con Cifrado BTP
+        async function enrollCurrentUser() {
+            const uid = document.getElementById('enrollUserId').value.trim();
+            const name = document.getElementById('enrollFullName').value.trim();
+            const resBox = document.getElementById('enrollResult');
+
+            if (!uid || !name) {
+                alert("Por favor ingrese DNI/ID y Nombre completo.");
+                return;
+            }
+
+            // Capturar frame actual
+            const snap = captureCurrentFrame();
+            if (!snap) {
+                alert("No se pudo capturar imagen de la cámara.");
+                return;
+            }
+
+            resBox.className = "p-4 rounded-xl text-xs bg-slate-800 text-slate-300 block";
+            resBox.textContent = "Extrayendo embedding ArcFace y cifrando con BTP (AES-256-GCM)...";
+
+            try {
+                const resp = await fetch('/api/enroll', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        user_id: uid,
+                        full_name: name,
+                        face_image_b64: snap
+                    })
+                });
+
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.detail || "Error en enrolamiento");
+
+                // Guardar en el dispositivo del alumno (Edge Storage)
+                localStorage.setItem('luma_user_id', uid);
+                localStorage.setItem('luma_biohash', data.cancelable_biohash);
+
+                resBox.className = "p-4 rounded-xl text-xs bg-emerald-950 border border-emerald-800 text-emerald-300 block space-y-1";
+                resBox.innerHTML = `
+                    <div class="font-bold">✓ ${data.message}</div>
+                    <div>Alumno: <b>${data.full_name}</b> (${data.user_id})</div>
+                    <div>Biohash Guardado en Dispositivo: <code class="bg-emerald-900/50 px-1 py-0.5 rounded">${data.cancelable_biohash}</code></div>
+                    <div>Esquema: <b>${data.security_schema}</b></div>
+                    <div class="text-[10px] text-emerald-400/80">Identidad vinculada a este navegador para matching 1:1 automático.</div>
+                `;
+                loadEnrolledUsers();
+            } catch (err) {
+                resBox.className = "p-4 rounded-xl text-xs bg-rose-950 border border-rose-800 text-rose-300 block";
+                resBox.textContent = "Error: " + err.message;
+            }
+        }
+
+        // Captura optimizada de bajo ancho de banda para concurrencia de aula (320x240 @ 0.65)
+        function captureCurrentFrame() {
+            const ctx = captureCanvas.getContext('2d');
+            captureCanvas.width = 320;
+            captureCanvas.height = 240;
+            ctx.drawImage(webcam, 0, 0, 320, 240);
+            return captureCanvas.toDataURL('image/jpeg', 0.65);
+        }
+
+        // ================= PIPELINE COMPLETO DE VERIFICACIÓN LUMAVIDA =================
+        async function startLivenessVerification() {
+            const btn = document.getElementById('startVerifyBtn');
+            const progressBadge = document.getElementById('captureProgressBadge');
+            const progressPct = document.getElementById('progressPct');
+            const selectedUserId = document.getElementById('userSelect').value;
+
+            btn.disabled = true;
+            btn.classList.add('opacity-50', 'cursor-not-allowed');
+            progressBadge.classList.remove('hidden');
+
+            try {
+                // 1. Solicitar desafío de colores (Anti-replay nonce)
+                const challengeResp = await fetch('/api/challenge', { method: 'POST' });
+                const challenge = await challengeResp.json();
+
+                const framesPayload = [];
+                const sequence = challenge.sequence;
+
+                // 2. Ejecutar proyección cromática y captura simultánea
+                let currentStepIdx = 0;
+                const startTime = performance.now();
+                const totalDuration = challenge.total_duration_ms;
+
+                // Reproducir estímulo cromático con requestAnimationFrame
+                await new Promise((resolve) => {
+                    function step(now) {
+                        const elapsed = now - startTime;
+                        progressPct.textContent = `${Math.min(100, Math.round((elapsed / totalDuration) * 100))}%`;
+
+                        // Determinar color activo
+                        let accum = 0;
+                        let activeColor = sequence[0];
+                        for (const s of sequence) {
+                            accum += s.duration_ms;
+                            if (elapsed <= accum) {
+                                activeColor = s;
+                                break;
+                            }
+                        }
+
+                        // Aplicar flash en pantalla completa y halo local con máxima intensidad
+                        flashOverlay.style.backgroundColor = activeColor.hex;
+                        flashOverlay.style.opacity = '0.95';
+                        chromaHalo.style.borderColor = activeColor.hex;
+
+                        // Capturar frame cada ~66ms (~15-18 FPS de muestreo payload)
+                        if (!step.lastCapture || (now - step.lastCapture) >= 66) {
+                            const b64 = captureCurrentFrame();
+                            framesPayload.push({
+                                timestamp_ms: elapsed,
+                                projected_color: { r: activeColor.r, g: activeColor.g, b: activeColor.b },
+                                image_b64: b64
+                            });
+                            step.lastCapture = now;
+                        }
+
+                        if (elapsed < totalDuration) {
+                            requestAnimationFrame(step);
+                        } else {
+                            // Apagar flash
+                            flashOverlay.style.opacity = '0';
+                            chromaHalo.style.borderColor = 'transparent';
+                            resolve();
+                        }
+                    }
+                    requestAnimationFrame(step);
+                });
+
+                progressBadge.classList.add('hidden');
+                document.getElementById('verdictContent').innerHTML = `
+                    <div class="animate-spin w-8 h-8 border-4 border-cyan-500 border-t-transparent rounded-full mb-3"></div>
+                    <div class="text-sm font-semibold text-cyan-300">Procesando Reflectancia, rPPG y ArcFace en Backend...</div>
+                `;
+
+                // 3. Enviar payload al backend de FastAPI
+                const verifyResp = await fetch('/api/verify', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        challenge_id: challenge.challenge_id,
+                        user_id: selectedUserId || null,
+                        frames: framesPayload,
+                        fps: 30.0
+                    })
+                });
+
+                const verifyData = await verifyResp.json();
+                if (!verifyResp.ok) throw new Error(verifyData.detail || "Error en verificación de vida");
+
+                // 4. Renderizar resultados del veredicto
+                renderVerificationResults(verifyData);
+
+            } catch (err) {
+                console.error("Error en verificación:", err);
+                alert("Error durante la prueba de vida: " + err.message);
+                document.getElementById('verdictContent').innerHTML = `
+                    <div class="w-16 h-16 rounded-full bg-rose-950 text-rose-400 flex items-center justify-center mb-3">
+                        <i data-lucide="alert-triangle" class="w-8 h-8"></i>
+                    </div>
+                    <h2 class="text-lg font-bold text-rose-400">Error en Verificación</h2>
+                    <p class="text-xs text-slate-400 max-w-sm mt-1">${err.message}</p>
+                `;
+                lucide.createIcons();
+            } finally {
+                btn.disabled = false;
+                btn.classList.remove('opacity-50', 'cursor-not-allowed');
+            }
+        }
+
+        // Renderizado de Resultados en la UI
+        function renderVerificationResults(data) {
+            const liveness = data.liveness;
+            const isBonaFide = liveness.is_bona_fide;
+            const ref = liveness.details.reflectance;
+            const rppg = liveness.details.rppg;
+            const idVerif = data.identity_verification;
+
+            // Latencia
+            document.getElementById('latencyBadge').textContent = `Latencia: ${data.latency_ms} ms (${data.target_latency_met ? '✓ < 2s' : 'Alerta'})`;
+
+            // 1. Tarjeta Principal
+            const vCard = document.getElementById('verdictCard');
+            const vContent = document.getElementById('verdictContent');
+
+            if (isBonaFide) {
+                vCard.className = "bg-slate-900 border-2 border-emerald-500/80 rounded-2xl p-5 shadow-xl shadow-emerald-500/10";
+                vContent.innerHTML = `
+                    <div class="w-16 h-16 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center mb-3 border border-emerald-500/40">
+                        <i data-lucide="check-circle-2" class="w-10 h-10"></i>
+                    </div>
+                    <h2 class="text-xl font-extrabold text-emerald-400">BONA FIDE (Humano Real)</h2>
+                    <p class="text-xs text-slate-300 max-w-md mt-1 font-medium">${liveness.decision_message}</p>
+                    <div class="mt-3 flex items-center gap-2 text-[11px] text-emerald-300/80 bg-emerald-950/60 px-3 py-1 rounded-full border border-emerald-800">
+                        <span>Puntuación Combinada: <b>${(liveness.combined_score * 100).toFixed(1)}%</b></span>
+                        <span>•</span>
+                        <span>PAD: Aprobado (ISO/IEC 30107-3)</span>
+                    </div>
+                `;
+            } else {
+                vCard.className = "bg-slate-900 border-2 border-rose-500/80 rounded-2xl p-5 shadow-xl shadow-rose-500/10";
+                vContent.innerHTML = `
+                    <div class="w-16 h-16 rounded-full bg-rose-500/20 text-rose-400 flex items-center justify-center mb-3 border border-rose-500/40">
+                        <i data-lucide="shield-x" class="w-10 h-10"></i>
+                    </div>
+                    <h2 class="text-xl font-extrabold text-rose-400">ATAQUE DE PRESENTACIÓN INTERCEPTADO</h2>
+                    <p class="text-xs text-slate-300 max-w-md mt-1 font-medium">${liveness.decision_message}</p>
+                    <div class="mt-3 flex items-center gap-2 text-[11px] text-rose-300/80 bg-rose-950/60 px-3 py-1 rounded-full border border-rose-800">
+                        <span>Tipo: <b>${liveness.attack_type}</b></span>
+                        <span>•</span>
+                        <span>Score: ${(liveness.combined_score * 100).toFixed(1)}%</span>
+                    </div>
+                `;
+            }
+
+            // 2. Módulo Reflectancia
+            document.getElementById('refScoreDisplay').textContent = ref.reflectance_score.toFixed(2);
+            document.getElementById('refBadge').textContent = ref.is_live ? 'Válido' : 'Fallo';
+            document.getElementById('refBadge').className = `px-2 py-0.5 rounded text-[10px] ${ref.is_live ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' : 'bg-rose-950 text-rose-300 border border-rose-800'}`;
+            document.getElementById('refDetailText').textContent = ref.reason;
+            document.getElementById('specularRatioText').textContent = (ref.specular_ratio * 100).toFixed(1) + '%';
+            document.getElementById('corrText').textContent = ref.correlation.toFixed(2);
+
+            // 3. Módulo rPPG
+            document.getElementById('bpmDisplay').textContent = rppg.bpm > 0 ? rppg.bpm : '--';
+            document.getElementById('rppgBadge').textContent = rppg.is_live ? 'Válido' : 'Fallo';
+            document.getElementById('rppgBadge').className = `px-2 py-0.5 rounded text-[10px] ${rppg.is_live ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' : 'bg-rose-950 text-rose-300 border border-rose-800'}`;
+            document.getElementById('rppgDetailText').textContent = rppg.reason;
+            document.getElementById('snrText').textContent = rppg.snr.toFixed(2);
+            document.getElementById('promText').textContent = (rppg.prominence_ratio || 1.0).toFixed(1) + 'x';
+            document.getElementById('rppgConfText').textContent = (rppg.confidence * 100).toFixed(0) + '%';
+
+            // Actualizar gráfico rPPG
+            if (rppg.bvp_waveform && rppg.bvp_waveform.length > 0 && rppgChartInstance) {
+                rppgChartInstance.data.labels = rppg.bvp_waveform.map((_, i) => i);
+                rppgChartInstance.data.datasets[0].data = rppg.bvp_waveform;
+                rppgChartInstance.data.datasets[0].borderColor = isBonaFide ? '#22d3ee' : '#f43f5e';
+                rppgChartInstance.update();
+            }
+
+            // 4. Módulo ArcFace 1:1
+            const arcBadge = document.getElementById('arcfaceBadge');
+            const arcSim = document.getElementById('similarityScoreDisplay');
+            const arcUser = document.getElementById('arcfaceUserMsg');
+            const arcDet = document.getElementById('arcfaceDetailsMsg');
+
+            if (idVerif.status === 'IDENTITY_VERIFIED' || idVerif.is_match) {
+                arcBadge.className = "px-2 py-0.5 rounded text-[10px] bg-emerald-950 text-emerald-300 border border-emerald-800";
+                arcBadge.textContent = "COINCIDENCIA 1:1";
+                arcSim.textContent = idVerif.similarity.toFixed(2);
+                arcUser.textContent = "Identidad Verificada con Éxito";
+                arcDet.textContent = `Similitud Coseno: ${idVerif.similarity.toFixed(4)} >= Umbral (${idVerif.threshold})`;
+            } else if (idVerif.status === 'SKIPPED_DUE_TO_PAD_FAILURE') {
+                arcBadge.className = "px-2 py-0.5 rounded text-[10px] bg-rose-950 text-rose-300 border border-rose-800";
+                arcBadge.textContent = "ABORTADO POR PAD";
+                arcSim.textContent = "0.00";
+                arcUser.textContent = "Matching 1:1 Bloqueado";
+                arcDet.textContent = "Por seguridad, ArcFace no se ejecuta si la prueba de vida falla.";
+            } else {
+                arcBadge.className = "px-2 py-0.5 rounded text-[10px] bg-amber-950 text-amber-300 border border-amber-800";
+                arcBadge.textContent = idVerif.status;
+                arcSim.textContent = idVerif.similarity.toFixed(2);
+                arcUser.textContent = idVerif.message || "No coincide identidad";
+                arcDet.textContent = `Similitud: ${idVerif.similarity.toFixed(2)} < Umbral`;
+            }
+
+            lucide.createIcons();
+        }
+
+        // Simulación de Ataques Forenses
+        async function runAttackSimulation(type) {
+            const box = document.getElementById('simResultBox');
+            box.classList.remove('hidden');
+            box.innerHTML = `<div class="animate-pulse text-cyan-400">Simulando vector de ataque "${type}"...</div>`;
+
+            try {
+                const res = await fetch(`/api/simulate-attack?scenario_type=${type}`, { method: 'POST' });
+                const data = await res.json();
+                const pad = data.simulated_liveness;
+                
+                box.innerHTML = `
+                    <div class="font-bold text-slate-200 mb-1 flex items-center justify-between">
+                        <span>Escenario: ${type.toUpperCase()}</span>
+                        <span class="px-2 py-0.5 rounded text-[10px] bg-rose-950 text-rose-300 border border-rose-800">${data.pad_verdict}</span>
+                    </div>
+                    <div class="text-rose-400 font-semibold">${pad.decision_message}</div>
+                    <div class="text-slate-400 mt-2">
+                        • Tipo detectado: <b class="text-slate-200">${pad.attack_type}</b><br>
+                        • Score combinado: <b class="text-slate-200">${pad.combined_score}</b> (Umbral: ${pad.threshold})<br>
+                        • Motivo reflectancia: <i>${pad.details.reflectance.reason}</i><br>
+                        • Motivo rPPG: <i>${pad.details.rppg.reason}</i>
+                    </div>
+                `;
+            } catch (e) {
+                box.innerHTML = `<div class="text-rose-400">Error: ${e.message}</div>`;
+            }
+        }
+
+        // Cargar Métricas ISO e Historial de Intentos con Umbrales Promedio
+        async function loadMetrics() {
+            try {
+                // 1. Métricas agregadas
+                const res = await fetch('/api/metrics');
+                const m = await res.json();
+                document.getElementById('mTotal').textContent = m.iso_iec_30107_3_pad.total_attempts;
+                document.getElementById('mBlocked').textContent = m.iso_iec_30107_3_pad.attacks_rejected;
+                document.getElementById('mApcer').textContent = m.iso_iec_30107_3_pad.apcer_rate_pct + '%';
+                document.getElementById('mLatency').textContent = m.performance.avg_latency_ms + ' ms';
+
+                // 2. Historial de intentos y promedios reales
+                const histRes = await fetch('/api/history');
+                const h = await histRes.json();
+                const avg = h.summary_averages.observed_bona_fide_averages;
+
+                document.getElementById('avgBonaSnr').textContent = avg.avg_rppg_snr > 0 ? avg.avg_rppg_snr.toFixed(2) : '--';
+                document.getElementById('avgBonaBpm').textContent = avg.avg_rppg_bpm > 0 ? avg.avg_rppg_bpm.toFixed(1) + ' BPM' : '--';
+                document.getElementById('avgBonaRef').textContent = avg.avg_reflectance_score > 0 ? avg.avg_reflectance_score.toFixed(2) : '--';
+                document.getElementById('avgBonaProm').textContent = avg.avg_rppg_prominence > 0 ? avg.avg_rppg_prominence.toFixed(1) + 'x' : '--';
+
+                const tbody = document.getElementById('historyTableBody');
+                if (h.recent_attempts && h.recent_attempts.length > 0) {
+                    tbody.innerHTML = '';
+                    h.recent_attempts.forEach(item => {
+                        const tr = document.createElement('tr');
+                        tr.className = "hover:bg-slate-800/40 transition";
+                        const badgeClass = item.is_bona_fide 
+                            ? "bg-emerald-950 text-emerald-300 border border-emerald-800" 
+                            : "bg-rose-950 text-rose-300 border border-rose-800";
+                        const badgeText = item.is_bona_fide ? "Bona Fide (Vivo)" : `Ataque (${item.attack_type})`;
+
+                        tr.innerHTML = `
+                            <td class="py-2 px-3 font-mono text-slate-400">${item.timestamp.split(' ')[1] || item.timestamp}</td>
+                            <td class="py-2 px-3 font-medium text-slate-200">${item.user_id}</td>
+                            <td class="py-2 px-3"><span class="px-2 py-0.5 rounded text-[10px] ${badgeClass}">${badgeText}</span></td>
+                            <td class="py-2 px-3 font-mono">${item.rppg.bpm > 0 ? item.rppg.bpm + ' BPM' : '--'}</td>
+                            <td class="py-2 px-3 font-mono text-cyan-300">${item.rppg.snr.toFixed(2)}</td>
+                            <td class="py-2 px-3 font-mono text-amber-300">${item.reflectance.score.toFixed(2)}</td>
+                            <td class="py-2 px-3 font-mono text-slate-400">${item.latency_ms} ms</td>
+                        `;
+                        tbody.appendChild(tr);
+                    });
+                }
+            } catch (e) {
+                console.error("Error cargando métricas e historial:", e);
+            }
+        }
+
+        // Inicialización al cargar la ventana
+        window.addEventListener('DOMContentLoaded', () => {
+            initCamera();
+            initRPPGChart();
+            loadEnrolledUsers();
+        });
+    </script>
+</body>
+</html>
